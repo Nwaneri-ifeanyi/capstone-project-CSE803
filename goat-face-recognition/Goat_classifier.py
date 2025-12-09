@@ -17,7 +17,7 @@ from torchvision.datasets import ImageFolder
 # 1. DATA CONFIGURATION AND LOADING (Goat Identity Recognition)
 # ====================================================================
 
-DATA_ROOT = '/Users/ifeanyinwaneri/Desktop/cse_project/1selected'
+DATA_ROOT = '/cse_project/1selected'
 NUM_CLASSES = 10 
 IMAGE_SIZE = 64 
 
@@ -224,8 +224,6 @@ else:
 print(f"Configuring device: {device}")
 
 # --- Execute Training, Collect History, and Plot ---
-# Note: Since the paper uses 80% train, 20% test, we will use the testloader 
-# as the validation source for the plots.
 trainloader = DataLoader(trainset, batch_size=64, shuffle=True)
 testloader = DataLoader(testset, batch_size=64, shuffle=False)
 
