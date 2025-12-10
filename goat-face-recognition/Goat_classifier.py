@@ -10,6 +10,7 @@ import torch.nn.functional as F
 from torchvision import transforms
 from torch.utils.data import DataLoader, random_split
 from torchvision.datasets import ImageFolder
+from torchvision import models
 
 
 class PaperPreprocessing(object):
@@ -96,9 +97,29 @@ class GoatNet(nn.Module):
         x = self.classifier(x)
         return x
 
-# ====================================================================
-# 5. TRAINING LOOP
-# ====================================================================
+class PretrainedGoatNet(nn.Module):
+    def __init__(self, num_classes, pretrained=True):
+        super(PretrainedGoatNet, self).__init__()
+        
+        # 1. Load Pretrained ResNet18
+        weights = models.ResNet18_Weights.DEFAULT if pretrained else None
+        self.model = models.resnet18(weights=weights)
+        
+        # 2. Modify Input Layer for Grayscale
+        # Original ResNet expects 3 channels (RGB). We change it to 1 channel.
+        # We keep the same kernel size and stride as the original.
+        self.model.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        
+        # 3. Modify Output Layer for Goat Classes
+        # The original fc layer outputs 1000 classes (ImageNet). We change it to num_classes (10).
+        num_ftrs = self.model.fc.in_features
+        self.model.fc = nn.Sequential(
+            nn.Dropout(0.5), # Add dropout for regularization
+            nn.Linear(num_ftrs, num_classes)
+        )
+
+    def forward(self, x):
+        return self.model(x)
 
 def train_model(NUM_CLASSES=10):
     model = GoatNet(NUM_CLASSES).to(device)
