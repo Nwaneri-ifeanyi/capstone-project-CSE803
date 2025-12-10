@@ -9,26 +9,8 @@ from torch import optim
 import torch.nn.functional as F
 from torchvision import transforms
 from torch.utils.data import DataLoader, random_split
-from torchvision.datasets import ImageFolder 
+from torchvision.datasets import ImageFolder
 
-# ====================================================================
-# 1. CONFIGURATION
-# ====================================================================
-
-DATA_ROOT = '../../processed_dataset_highres' # Path to your high-res folders
-SAVE_PATH = 'goat_recognition_model.pth'
-IMAGE_SIZE = 64     # Paper specifies 64x64 input [cite: 118, 123]
-BATCH_SIZE = 32
-NUM_EPOCHS = 200
-LEARNING_RATE = 0.01
-
-# Check Device
-device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
-print(f"Using device: {device}")
-
-# ====================================================================
-# 2. CUSTOM PREPROCESSING (From Paper Methodology)
-# ====================================================================
 
 class PaperPreprocessing(object):
     """
@@ -49,46 +31,12 @@ class PaperPreprocessing(object):
         img_eq = cv2.equalizeHist(img_np)
         
         # 2. Bilateral Filter
-        # "bilateral filter used for noise reduction" 
-        # Parameters (9, 75, 75) are standard for this operation
         img_blur = cv2.bilateralFilter(img_eq, 9, 75, 75)
         
         # Return as PIL Image (for PyTorch compatibility)
         return transforms.ToPILImage()(img_blur)
 
-# ====================================================================
-# 3. DATA TRANSFORMS & LOADING
-# ====================================================================
 
-# Training Transform: Includes Augmentation to fix overfitting
-train_transform = transforms.Compose([
-    transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)), # Resize to 64x64 [cite: 123]
-    PaperPreprocessing(),                        # Apply HistEq + Bilateral 
-    transforms.RandomHorizontalFlip(p=0.5),      # Augmentation: Flip
-    transforms.RandomRotation(10),               # Augmentation: Rotate
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.5], std=[0.5])  # Normalize to [-1, 1]
-])
-
-# Validation Transform: No random augmentation
-val_transform = transforms.Compose([
-    transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
-    PaperPreprocessing(),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.5], std=[0.5])
-])
-
-print("Loading dataset...")
-# Load raw data first
-full_dataset = ImageFolder(root=DATA_ROOT) 
-
-# Split indices
-train_size = int(0.8 * len(full_dataset)) # 80% Training [cite: 179]
-val_size = len(full_dataset) - train_size
-train_subset, val_subset = random_split(full_dataset, [train_size, val_size], 
-                                        generator=torch.Generator().manual_seed(42))
-
-# Apply the specific transforms to the subsets
 class TransformedSubset(torch.utils.data.Dataset):
     def __init__(self, subset, transform):
         self.subset = subset
@@ -99,49 +47,48 @@ class TransformedSubset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.subset)
 
-train_data = TransformedSubset(train_subset, train_transform)
-val_data = TransformedSubset(val_subset, val_transform)
 
-train_loader = DataLoader(train_data, batch_size=BATCH_SIZE, shuffle=True)
-val_loader = DataLoader(val_data, batch_size=BATCH_SIZE, shuffle=False)
-
-NUM_CLASSES = len(full_dataset.classes)
-print(f"Classes: {NUM_CLASSES} | Train Images: {len(train_data)} | Val Images: {len(val_data)}")
-
-# ====================================================================
-# 4. MODEL ARCHITECTURE
-# ====================================================================
 
 class GoatNet(nn.Module):
     def __init__(self, num_classes):
         super(GoatNet, self).__init__()
         
-        # Feature Extractor (4 Blocks) [cite: 124]
+        # Feature Extractor (5 Blocks as per Paper)
         self.features = nn.Sequential(
-            # Block 1
+            # Block 1: 64x64 -> 32x32
             nn.Conv2d(1, 32, 3, 1, 1), nn.ReLU(),
             nn.MaxPool2d(2, 2),
-            # Block 2
+            
+            # Block 2: 32x32 -> 16x16 
+            nn.Conv2d(32, 32, 3, 1, 1), nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+            
+            # Block 3: 16x16 -> 8x8
             nn.Conv2d(32, 64, 3, 1, 1), nn.ReLU(),
             nn.MaxPool2d(2, 2),
-            # Block 3
+            
+            # Block 4: 8x8 -> 4x4
             nn.Conv2d(64, 128, 3, 1, 1), nn.ReLU(),
             nn.MaxPool2d(2, 2),
-            # Block 4
+
+            # Block 5: 4x4 -> 2x2 
             nn.Conv2d(128, 128, 3, 1, 1), nn.ReLU(),
             nn.MaxPool2d(2, 2)
         )
         
-        # Classifier with Dropout
+        # Classifier
         self.classifier = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(128 * 4 * 4, 256),
+            # Input size is now 128 channels * 2 * 2 pixels = 512
+            nn.Linear(128 * 4 * 4, 256), 
             nn.ReLU(),
-            nn.Dropout(0.5), # Regularization to prevent overfitting
-            nn.Linear(256, 256),
+            nn.Dropout(0.5), 
+            
+            nn.Linear(256, 256), 
             nn.ReLU(),
-            nn.Dropout(0.5), # Regularization
-            nn.Linear(256, num_classes) # [cite: 159]
+            nn.Dropout(0.0), 
+            
+            nn.Linear(256, num_classes) 
         )
 
     def forward(self, x):
@@ -153,7 +100,7 @@ class GoatNet(nn.Module):
 # 5. TRAINING LOOP
 # ====================================================================
 
-def train_model():
+def train_model(NUM_CLASSES=10):
     model = GoatNet(NUM_CLASSES).to(device)
     
     # Paper uses SGD 
@@ -216,37 +163,6 @@ def train_model():
         
         print(f"Epoch {epoch+1}: Train Acc: {epoch_train_acc:.4f} | Val Acc: {epoch_val_acc:.4f} | Val Loss: {epoch_val_loss:.4f}")
 
-    # ====================================================================
-    # 6. SAVING & PLOTTING
-    # ====================================================================
-    
-    # Save Model Artifacts
-    print(f"\nSaving model to {SAVE_PATH}...")
-    torch.save({
-        'model_state_dict': model.state_dict(),
-        'class_to_idx': full_dataset.class_to_idx,
-        'idx_to_class': {v: k for k, v in full_dataset.class_to_idx.items()},
-        'image_size': IMAGE_SIZE,
-        'num_classes': NUM_CLASSES
-    }, SAVE_PATH)
-    
-    # Plot Results
-    plt.figure(figsize=(12, 5))
-    
-    plt.subplot(1, 2, 1)
-    plt.plot(history['train_loss'], label='Train Loss')
-    plt.plot(history['val_loss'], label='Val Loss')
-    plt.title('Loss over Epochs')
-    plt.legend()
-    
-    plt.subplot(1, 2, 2)
-    plt.plot(history['train_acc'], label='Train Accuracy')
-    plt.plot(history['val_acc'], label='Val Accuracy')
-    plt.title('Accuracy over Epochs')
-    plt.legend()
-    
-    plt.savefig('final_training_results.png')
-    print("Training Complete. Results saved.")
-
+   
 if __name__ == "__main__":
     train_model()
