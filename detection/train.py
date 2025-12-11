@@ -1,15 +1,4 @@
-# -*- coding: utf-8 -*-
-'''
-@Time          : 2020/05/06 15:07
-@Author        : Tianxiaomo
-@File          : train.py
-@Noice         :
-@Modificattion :
-    @Author    :
-    @Time      :
-    @Detail    :
 
-'''
 import time
 import logging
 import os, sys, math
@@ -138,6 +127,8 @@ class Yolo_loss(nn.Module):
         image_size = 608
         self.n_classes = n_classes
         self.n_anchors = n_anchors
+        # Keep objectness loss smaller so it doesn't dominate other losses.
+        self.obj_loss_scale = 0.01 ## CHANGE
 
         self.anchors = [[12, 16], [19, 36], [40, 28], [36, 75], [76, 55], [72, 146], [142, 110], [192, 243], [459, 401]]
         self.anch_masks = [[0, 1, 2], [3, 4, 5], [6, 7, 8]]
@@ -256,17 +247,14 @@ class Yolo_loss(nn.Module):
             output = output.view(batchsize, self.n_anchors, n_ch, fsize, fsize)
             output = output.permute(0, 1, 3, 4, 2)  # .contiguous()
 
-            # logistic activation for xy, obj, cls
-            # output[..., np.r_[:2, 4:n_ch]] = torch.sigmoid(output[..., np.r_[:2, 4:n_ch]])
+           
             output[..., :2] = torch.sigmoid(output[..., :2])   
             output[..., 4:] = torch.sigmoid(output[..., 4:]) 
 
             # import pdb;pdb.set_trace()
             pred = output[..., :4].clone()
-            # pred[..., 0] += self.grid_x[output_id]
-            # pred[..., 1] += self.grid_y[output_id]
-            # pred[..., 2] = torch.exp(pred[..., 2]) * self.anchor_w[output_id]
-            # pred[..., 3] = torch.exp(pred[..., 3]) * self.anchor_h[output_id]
+          
+          
             gx = self.grid_x[output_id][:batchsize]    # shape: (batchsize, n_anchors, fsize, fsize)
             gy = self.grid_y[output_id][:batchsize]
             aw = self.anchor_w[output_id][:batchsize]
@@ -307,7 +295,7 @@ class Yolo_loss(nn.Module):
             loss_l2 += F.mse_loss(input=output, target=target, reduction='sum')
 
         # import pdb;pdb.set_trace()
-        loss_obj = 0.001*loss_obj
+        loss_obj = self.obj_loss_scale * loss_obj
         loss = loss_xy + loss_wh + loss_obj + loss_cls
 
         return loss, loss_xy, loss_wh, loss_obj, loss_cls, loss_l2
@@ -343,15 +331,7 @@ def train(model, device, config, epochs=5, batch_size=1, save_cp=True, log_step=
 
     val_loader = DataLoader(val_dataset, batch_size=config.batch // config.subdivisions, shuffle=True, collate_fn=val_collate, drop_last=True)
 
-    # val_loader = DataLoader(val_dataset, batch_size=config.batch // config.subdivisions, shuffle=True, num_workers=8,
-    #                         pin_memory=True, drop_last=True, collate_fn=val_collate)
 
-    # writer = SummaryWriter(log_dir=config.TRAIN_TENSORBOARD_DIR,
-                        #    filename_suffix=f'OPT_{config.TRAIN_OPTIMIZER}_LR_{config.learning_rate}_BS_{config.batch}_Sub_{config.subdivisions}_Size_{config.width}',
-                        #    comment=f'OPT_{config.TRAIN_OPTIMIZER}_LR_{config.learning_rate}_BS_{config.batch}_Sub_{config.subdivisions}_Size_{config.width}')
-    # writer.add_images('legend',
-    #                   torch.from_numpy(train_dataset.label2colorlegend2(cfg.DATA_CLASSES).transpose([2, 0, 1])).to(
-    #                       device).unsqueeze(0))
     max_itr = config.TRAIN_EPOCHS * n_train
     # global_step = cfg.TRAIN_MINEPOCH * n_train
     global_step = 0
@@ -383,45 +363,30 @@ def train(model, device, config, epochs=5, batch_size=1, save_cp=True, log_step=
             factor = 0.01
         return factor
 
-    # if config.TRAIN_OPTIMIZER.lower() == 'adam':
-    #     optimizer = optim.Adam(
-    #         model.parameters(),
-    #         lr=config.learning_rate / config.batch,
-    #         betas=(0.9, 0.999),
-    #         eps=1e-08,
-    #     )
-    # elif config.TRAIN_OPTIMIZER.lower() == 'sgd':
-    #     optimizer = optim.SGD(
-    #         params=model.parameters(),
-    #         lr=config.learning_rate / config.batch,
-    #         momentum=config.momentum,
-    #         weight_decay=config.decay,
-    #     )
+
     if config.TRAIN_OPTIMIZER.lower() == 'adam':
         optimizer = optim.Adam(
             model.parameters(),
-            lr=1e-4,
+            lr=5e-4,
             betas=(0.9, 0.999),
             eps=1e-08,
         )
     elif config.TRAIN_OPTIMIZER.lower() == 'sgd':
         optimizer = optim.SGD(
             params=model.parameters(),
-            lr=config.learning_rate,
+            lr=7e-4,
             momentum=config.momentum,
             weight_decay=config.decay,
         )
-    # import pdb;pdb.set_trace()
 
 
 
-    # scheduler = optim.lr_scheduler.LambdaLR(optimizer, burnin_schedule)
     scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda step: 0.99 ** step)
 
 
     criterion = Yolo_loss(device=device, batch=config.batch // config.subdivisions, n_classes=config.classes)
-    # scheduler = ReduceLROnPlateau(optimizer, mode='max', verbose=True, patience=6, min_lr=1e-7)
-    # scheduler = CosineAnnealingWarmRestarts(optimizer, 0.001, 1e-6, 20)
+
+
 
     save_prefix = 'Yolov4_epoch'
     saved_models = deque()
@@ -433,6 +398,10 @@ def train(model, device, config, epochs=5, batch_size=1, save_cp=True, log_step=
     loss_obj_list = []
     loss_cls_list = []
     loss_l2_list = []
+
+    metrics_history = []
+    metrics_dump_path = getattr(config, "metrics_log_path", os.path.join("log", "metrics_history_sgd.pkl"))
+    os.makedirs(os.path.dirname(metrics_dump_path), exist_ok=True)
 
     for epoch in range(epochs):
         # model.train()
@@ -477,30 +446,8 @@ def train(model, device, config, epochs=5, batch_size=1, save_cp=True, log_step=
                 epoch_loss += loss.item()
 
                 if global_step % config.subdivisions == 0:
-                    # for i, pg in enumerate(optimizer.param_groups):
-                    #     lr = pg.get("lr", None)
-                    #     weight_decay = pg.get("weight_decay", None)
-                    #     print(f"OPT PG {i}: lr={lr} weight_decay={weight_decay} num_params={len(pg['params'])}")
-                    #     # Show one example parameter value (first param) before step
-                    # first_param = next(model.parameters())
-                    # print("FIRST_PARAM_MEAN_BEFORE:", first_param.data.mean().item())
-                    # import pdb;pdb.set_trace()
-
-                    # in_opt = any(first_param is p for pg in optimizer.param_groups for p in pg['params'])
-                    # print("FIRST_PARAM_IN_OPT:", in_opt)
-
-                    # for i, pg in enumerate(optimizer.param_groups):
-                    #     print(f"PG {i}: lr={pg.get('lr')} n_params={len(pg['params'])}")
-
-                    # import pdb;pdb.set_trace()
                     optimizer.step()
-
-                    # print("FIRST_PARAM_MEAN_AFTER:", first_param.data.mean().item())
-
-                    # import pdb;pdb.set_trace()
                     scheduler.step()
-                    # print(optimizer.param_groups[0]['lr'])
-
                     model.zero_grad()
 
 
@@ -515,116 +462,72 @@ def train(model, device, config, epochs=5, batch_size=1, save_cp=True, log_step=
                         f"cls={loss_cls.item():.1f} | "
                         f"l2={loss_l2.item():.1f}"
                     )
-                
-                # print(**{'loss (batch)': loss.item(), 'loss_xy': loss_xy.item(),
-                #                         'loss_wh': loss_wh.item(),
-                #                         'loss_obj': loss_obj.item(),
-                #                         'loss_cls': loss_cls.item(),
-                #                         'loss_l2': loss_l2.item(),
-                #                         'lr': scheduler.get_lr()[0] * config.batch
-                #                         })
-
-                # if global_step % (log_step * config.subdivisions) == 0:
-                #     # writer.add_scalar('train/Loss', loss.item(), global_step)
-                #     # writer.add_scalar('train/loss_xy', loss_xy.item(), global_step)
-                #     # writer.add_scalar('train/loss_wh', loss_wh.item(), global_step)
-                #     # writer.add_scalar('train/loss_obj', loss_obj.item(), global_step)
-                #     # writer.add_scalar('train/loss_cls', loss_cls.item(), global_step)
-                #     # writer.add_scalar('train/loss_l2', loss_l2.item(), global_step)
-                #     # writer.add_scalar('lr', scheduler.get_lr()[0] * config.batch, global_step)
-                #     pbar.set_postfix(**{'loss (batch)': loss.item(), 'loss_xy': loss_xy.item(),
-                #                         'loss_wh': loss_wh.item(),
-                #                         'loss_obj': loss_obj.item(),
-                #                         'loss_cls': loss_cls.item(),
-                #                         'loss_l2': loss_l2.item(),
-                #                         'lr': scheduler.get_lr()[0] * config.batch
-                #                         })
-                #     logging.debug('Train step_{}: loss : {},loss xy : {},loss wh : {},'
-                #                   'loss obj : {}，loss cls : {},loss l2 : {},lr : {}'
-                #                   .format(global_step, loss.item(), loss_xy.item(),
-                #                           loss_wh.item(), loss_obj.item(),
-                #                           loss_cls.item(), loss_l2.item(),
-                #                           scheduler.get_lr()[0] * config.batch))
+            
 
                 pbar.update(images.shape[0])
             
 
-            # if cfg.use_darknet_cfg:
-            #     eval_model = Darknet(cfg.cfgfile, inference=True)
-            # else:
-            # import pdb;pdb.set_trace()
-            if (epoch+1)%5 == 0:
-                import pdb;pdb.set_trace()
-                # with open("loss_list.pkl", "wb") as file: pickle.dump(loss_list, file)
-                # with open("loss_xy_lisyt.pkl", "wb") as file: pickle.dump(loss_xy_list, file)
-                # with open("loss_wh_list.pkl", "wb") as file: pickle.dump(loss_wh_list, file)
-                # with open("loss_obj_list.pkl", "wb") as file: pickle.dump(loss_obj_list, file)
-                # with open("loss_cls_list.pkl", "wb") as file: pickle.dump(loss_cls_list, file)
-                # with open("loss_l2_list.pkl", "wb") as file: pickle.dump(loss_l2_list, file)
 
-
+            if (epoch + 1) % 5 == 0:
                 eval_model = Yolov4(cfg.pretrained, n_classes=cfg.classes, inference=True)
-                # eval_model = Yolov4(yolov4conv137weight=None, n_classes=config.classes, inference=True)
-                # if torch.cuda.device_count() > 1:
-                #     eval_model.load_state_dict(model.module.state_dict())
-                # else:
                 eval_model.load_state_dict(model.state_dict())
                 eval_model.to(device)
                 evaluator = evaluate(eval_model, val_loader, config, device)
-                # import pdb;pdb.set_trace()
                 del eval_model
-                # with torch.no_grad():
-                #     evaluator = evaluate(model, val_loader, config, device)
 
                 stats = evaluator.coco_eval['bbox'].stats
-                # writer.add_scalar('train/AP', stats[0], global_step)
-                # writer.add_scalar('train/AP50', stats[1], global_step)
-                # writer.add_scalar('train/AP75', stats[2], global_step)
-                # writer.add_scalar('train/AP_small', stats[3], global_step)
-                # writer.add_scalar('train/AP_medium', stats[4], global_step)
-                # writer.add_scalar('train/AP_large', stats[5], global_step)
-                # writer.add_scalar('train/AR1', stats[6], global_step)
-                # writer.add_scalar('train/AR10', stats[7], global_step)
-                # writer.add_scalar('train/AR100', stats[8], global_step)
-                # writer.add_scalar('train/AR_small', stats[9], global_step)
-                # writer.add_scalar('train/AR_medium', stats[10], global_step)
-                # writer.add_scalar('train/AR_large', stats[11], global_step)
-                
-                import pdb;pdb.set_trace()
-            # if save_cp:
-            #     try:
-            #         # os.mkdir(config.checkpoints)
-            #         os.makedirs(config.checkpoints, exist_ok=True)
-            #         logging.info('Created checkpoint directory')
-            #     except OSError:
-            #         pass
-            #     save_path = os.path.join(config.checkpoints, f'{save_prefix}{epoch + 1}.pth')
-            #     if isinstance(model, torch.nn.DataParallel):
-            #         torch.save(model.moduel,state_dict(), save_path)
-            #     else:
-            #         torch.save(model.state_dict(), save_path)
-            #     logging.info(f'Checkpoint {epoch + 1} saved !')
-            #     saved_models.append(save_path)
-            #     if len(saved_models) > config.keep_checkpoint_max > 0:
-            #         model_to_remove = saved_models.popleft()
-            #         try:
-            #             os.remove(model_to_remove)
-            #         except:
-            #             logging.info(f'failed to remove {model_to_remove}')
-
-    # writer.close()
+                epoch_metrics = {
+                    "epoch": epoch + 1,
+                    "ap": float(stats[0]),
+                    "loss": loss_list.copy(),
+                    "loss_xy": loss_xy_list.copy(),
+                    "loss_wh": loss_wh_list.copy(),
+                    "loss_obj": loss_obj_list.copy(),
+                    "loss_cls": loss_cls_list.copy(),
+                    "loss_l2": loss_l2_list.copy(),
+                }
+                metrics_history.append(epoch_metrics)
+                with open(metrics_dump_path, "wb") as f:
+                    pickle.dump(metrics_history, f)
+                logging.info(f"Saved metrics history to {metrics_dump_path}")
+                logging.info(
+                    f"Epoch {epoch + 1}: AP={stats[0]:.4f} AP50={stats[1]:.4f} "
+                    f"AP75={stats[2]:.4f} AR={stats[8]:.4f}"
+                )
+   
 
 
 @torch.no_grad()
 def evaluate(model, data_loader, cfg, device, logger=None, **kwargs):
     """ finished, tested
     """
+    def _xywh_to_xyxy(boxes: torch.Tensor) -> torch.Tensor:
+        if boxes.numel() == 0:
+            return boxes
+        out = boxes.clone()
+        out[:, 2] = out[:, 0] + out[:, 2]
+        out[:, 3] = out[:, 1] + out[:, 3]
+        return out
+
+    def _iou_matrix(pred_boxes: torch.Tensor, gt_boxes: torch.Tensor) -> torch.Tensor:
+        if pred_boxes.numel() == 0 or gt_boxes.numel() == 0:
+            return torch.zeros(pred_boxes.size(0), gt_boxes.size(0))
+        lt = torch.max(pred_boxes[:, None, :2], gt_boxes[None, :, :2])
+        rb = torch.min(pred_boxes[:, None, 2:], gt_boxes[None, :, 2:])
+        wh = (rb - lt).clamp(min=0)
+        inter = wh[..., 0] * wh[..., 1]
+        pred_area = (pred_boxes[:, 2] - pred_boxes[:, 0]) * (pred_boxes[:, 3] - pred_boxes[:, 1])
+        gt_area = (gt_boxes[:, 2] - gt_boxes[:, 0]) * (gt_boxes[:, 3] - gt_boxes[:, 1])
+        union = pred_area[:, None] + gt_area - inter
+        return inter / union.clamp(min=1e-6)
+
     # cpu_device = torch.device("cpu")
     model.eval()
     # header = 'Test:'
 
     coco = convert_to_coco_api(data_loader.dataset, bbox_fmt='coco')
     coco_evaluator = CocoEvaluator(coco, iou_types = ["bbox"], bbox_fmt='coco')
+    debug_logged = 0
 
     for images, targets in data_loader:
         # import pdb;pdb.set_trace()
@@ -649,139 +552,79 @@ def evaluate(model, data_loader, cfg, device, logger=None, **kwargs):
         res = {}
         # for img, target, output in zip(images, targets, outputs):
         
-
-        
-        for img, target, boxes, confs in zip(images, targets, outputs[0], outputs[1]):
-            img_height, img_width = img.shape[:2]
-            # boxes = output[...,:4].copy()  # output boxes in yolo format
-            # boxes = boxes.squeeze(1).cpu().detach().numpy()
-            # import pdb;pdb.set_trace()
-            boxes = boxes.cpu().detach().numpy()
-            # boxes[...,2:] = boxes[...,2:] - boxes[...,:2] # Transform [x1, y1, x2, y2] to [x1, y1, w, h]
-            # boxes[...,0] = boxes[...,0]*img_width
-            # boxes[...,1] = boxes[...,1]*img_height
-            # boxes[...,2] = boxes[...,2]*img_width
-            # boxes[...,3] = boxes[...,3]*img_height
-
-            xc = boxes[:, :, 0]
-            yc = boxes[:, :, 1]
-            w_rel = boxes[:,:,  2]
-            h_rel = boxes[:,: , 3]
-
-            # import pdb;pdb.set_trace()
-
-            w = w_rel * img_width
-            h = h_rel * img_height
-            x1 = xc * img_width - w / 2.0
-            y1 = yc * img_height - h / 2.0
-
-            boxes_xywh = np.stack([x1, y1, w, h], axis=2)  # [N, 4] in COCO [x,y,w,h] pixels
-
-            # import pdb;pdb.set_trace()
-
-            # def iou(box1, box2):
-            #     # box format: [x, y, w, h]
-            #     x1, y1, w1, h1 = box1
-            #     x2, y2, w2, h2 = box2
-
-            #     xa = max(x1, x2)
-            #     ya = max(y1, y2)
-            #     xb = min(x1 + w1, x2 + w2)
-            #     yb = min(y1 + h1, y2 + h2)
-
-            #     inter = max(0, xb - xa) * max(0, yb - ya)
-            #     union = w1*h1 + w2*h2 - inter
-            #     return inter / union if union > 0 else 0
-
-            # # Get top-k predicted boxes (after scaling!)
-            # pred = boxes  # your array of 22743 boxes AFTER scaling to pixels
-
-            # # Convert predictions to xywh for IoU (if still xyxy)
-            # pred_xywh = pred.copy()
-            # pred_xywh[:, 2:] = pred_xywh[:, 2:] - pred_xywh[:, :2]
-
-            # print("GT boxes:", target["boxes"][:3])
-            # print("Pred sample:", pred_xywh[:3])
-
-            # # Compute IoU between all 6 GT boxes and top 200 predictions
-            # ious = []
-            # for gt in target["boxes"].cpu().numpy():
-            #     for pr in pred_xywh[:200]:
-            #         ious.append(iou(gt, pr))
-
-            # print("max IoU =", np.max(ious))
-
-            # import pdb;pdb.set_trace()
-
-
-
-
-
-
-            boxes = torch.as_tensor(boxes_xywh, dtype=torch.float32)
-            # confs = output[...,4:].copy()
-            confs = confs.cpu().detach().numpy()
-            labels = np.argmax(confs, axis=1).flatten()
-            labels = torch.as_tensor(labels, dtype=torch.int64)
-            scores = np.max(confs, axis=1).flatten()
-            scores = torch.as_tensor(scores, dtype=torch.float32)
-            res[target["image_id"].item()] = {
-                "boxes": boxes,
-                "scores": scores,
-                "labels": labels,
-            }
-        '''
-
         for img, target, boxes, confs in zip(images, targets, outputs[0], outputs[1]):
             img_height, img_width = img.shape[:2]
 
-            # 1) boxes: [num_boxes, 1, 4]  -> [num_boxes, 4]
-            boxes = boxes.squeeze(1).cpu().detach().numpy()  # YOLO format: [xc, yc, w, h] in [0,1]
-            confs = confs.cpu().detach().numpy()             # [num_boxes, num_classes]
+            # YOLO layer returns normalized [x1, y1, x2, y2]. Convert to pixel [x, y, w, h].
+            boxes = boxes.squeeze(1).cpu().detach().numpy()
+            boxes[..., 0] *= img_width
+            boxes[..., 2] *= img_width
+            boxes[..., 1] *= img_height
+            boxes[..., 3] *= img_height
+            boxes[..., 2:] = boxes[..., 2:] - boxes[..., :2]
 
-            xc = boxes[:, 0]
-            yc = boxes[:, 1]
-            w_rel = boxes[:, 2]
-            h_rel = boxes[:, 3]
+            finite_mask = np.isfinite(boxes).all(axis=1)
+            boxes = boxes[finite_mask]
+            confs = confs.cpu().detach().numpy()[finite_mask]
 
-            w = w_rel * img_width
-            h = h_rel * img_height
-            x1 = xc * img_width - w / 2.0
-            y1 = yc * img_height - h / 2.0
-
-            boxes_xywh = np.stack([x1, y1, w, h], axis=1)  # [N, 4] in COCO [x,y,w,h] pixels
-
-            finite_mask = np.isfinite(boxes_xywh).all(axis=1)
-            boxes_xywh = boxes_xywh[finite_mask]
-            confs = confs[finite_mask]
-
-            if boxes_xywh.shape[0] == 0:
+            positive_wh = (boxes[:, 2] > 0) & (boxes[:, 3] > 0)
+            boxes = boxes[positive_wh]
+            confs = confs[positive_wh]
+            if boxes.shape[0] == 0:
                 continue
 
             scores = np.max(confs, axis=1)
             labels = np.argmax(confs, axis=1)
 
-            # conf_thresh = 0.1  
-            # keep = scores > conf_thresh
-
-            # boxes_xywh = boxes_xywh[keep]
-            # scores = scores[keep]
-            # labels = labels[keep]
-
-            if boxes_xywh.shape[0] == 0:
+            # keep only confident predictions and cap to a manageable amount
+            conf_thresh = 1e-3
+            keep = scores > conf_thresh
+            boxes = boxes[keep]
+            scores = scores[keep]
+            labels = labels[keep]
+            if boxes.shape[0] == 0:
                 continue
 
-            boxes_t  = torch.as_tensor(boxes_xywh, dtype=torch.float32)
-            scores_t = torch.as_tensor(scores,     dtype=torch.float32)
-            labels_t = torch.as_tensor(labels,     dtype=torch.int64)
+            max_dets = 300  # ensure top-100 after COCO's filtering
+            if boxes.shape[0] > max_dets:
+                top_idx = np.argpartition(scores, -max_dets)[-max_dets:]
+                top_idx = top_idx[np.argsort(scores[top_idx])[::-1]]
+                boxes = boxes[top_idx]
+                scores = scores[top_idx]
+                labels = labels[top_idx]
+
+            boxes_t = torch.as_tensor(boxes, dtype=torch.float32)
+            scores_t = torch.as_tensor(scores, dtype=torch.float32)
+            labels_t = torch.as_tensor(labels, dtype=torch.int64)
 
             res[target["image_id"].item()] = {
-                "boxes":  boxes_t,   # [x,y,w,h] in pixels
+                "boxes": boxes_t,
                 "scores": scores_t,
                 "labels": labels_t,
             }
-
-        '''
+            if debug_logged < 5:
+                gt_boxes = target["boxes"].detach().cpu()
+                gt_labels = target["labels"].detach().cpu()
+                pred_xyxy = _xywh_to_xyxy(boxes_t)
+                gt_xyxy = _xywh_to_xyxy(gt_boxes)
+                ious = _iou_matrix(pred_xyxy, gt_xyxy)
+                best_any = ious.max().item() if ious.numel() else 0.0
+                label_mask = (labels_t.view(-1, 1) == gt_labels.view(1, -1))
+                same_cls_ious = ious * label_mask.float()
+                best_same_cls = same_cls_ious.max().item() if same_cls_ious.numel() else 0.0
+                rank_info = ""
+                if same_cls_ious.numel() and same_cls_ious.max().item() > 0:
+                    flat_idx = torch.argmax(same_cls_ious)
+                    pred_idx = flat_idx // same_cls_ious.shape[1]
+                    best_score = scores_t[pred_idx].item()
+                    sorted_scores, _ = torch.sort(scores_t, descending=True)
+                    rank = (sorted_scores >= best_score).sum().item()
+                    rank_info = f"best_cls_score={best_score:.3f} rank={rank}"
+                print(
+                    f"[eval debug] img_id={target['image_id'].item()} preds={boxes_t.shape[0]} gts={gt_boxes.shape[0]} "
+                    f"max_score={scores_t.max().item():.3f} best_iou={best_any:.3f} best_cls_iou={best_same_cls:.3f} {rank_info}"
+                )
+                debug_logged += 1
 
 
         evaluator_time = time.time()
@@ -794,6 +637,13 @@ def evaluate(model, data_loader, cfg, device, logger=None, **kwargs):
     # accumulate predictions from all images
     coco_evaluator.accumulate()
     coco_evaluator.summarize()
+    bbox_eval = coco_evaluator.coco_eval["bbox"]
+    num_preds = len(bbox_eval.cocoDt.anns) if bbox_eval.cocoDt is not None else 0
+    num_gts = len(bbox_eval.cocoGt.anns) if bbox_eval.cocoGt is not None else 0
+    sample_pred = next(iter(bbox_eval.cocoDt.anns.values()), None) if num_preds else None
+    print(f"[eval summary] preds={num_preds} gts={num_gts} catIds={bbox_eval.params.catIds}")
+    if sample_pred:
+        print(f"[eval summary] sample pred: {sample_pred}")
 
     return coco_evaluator
 
