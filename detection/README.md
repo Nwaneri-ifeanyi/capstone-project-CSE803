@@ -1,6 +1,6 @@
 # CSE803 Facial Landmark Detection Project
 
-This folder contains a customised PyTorch implementation of **YOLOv4** that we use for the CSE803 course project. It extends the original Tianxiaomo codebase with data loaders for our annotations, evaluation hooks that log every 5 epochs, and utilities for plotting losses and mAP.
+This folder contains a customised PyTorch implementation of **YOLOv4** that we use for the CSE803 course project. It extends the original Tianxiaomo codebase with data loaders for our annotations, evaluation hooks that log every 5 epochs.
 
 ---
 
@@ -28,11 +28,10 @@ Download the weights from the original repository.
 
    ```bash
    python train.py \
-     -g 0 \
      -pretrained yolov4.conv.137.pth \
-     -train_label_path label_train.txt \
      -classes 4
    ```
+
 ---
 
 ## Credits
